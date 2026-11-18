@@ -866,3 +866,131 @@ test("eapi requests pair the desktop User-Agent with the PC payload and host", a
   assert.ok(seenHeaders["User-Agent"].includes(`NeteaseMusicDesktop/${seenPayload.data.header.appver}`));
   assert.ok(!seenHeaders["User-Agent"].includes("iPhone"));
 });
+
+// App switching on iOS can drop the poll connection after QR approval.
+test("QR login recovers poll and profile disconnects with the same QR and pending cookies", async (t) => {
+  const timer = globalThis.setTimeout;
+  t.mock.method(globalThis, "setTimeout", (fn, ms, ...args) => timer(fn, ms <= 1500 ? 0 : ms, ...args));
+  let keys = 0, polls = 0, profiles = 0;
+  const { plugin, storage, prompts } = await setup(async (url, init) => {
+    if (url.includes("unikey")) {
+      keys++;
+      return response({ code: 200, unikey: "synthetic-same-qr" });
+    }
+    if (url.includes("qrcode/client/login")) {
+      const { data } = decode(init.body);
+      assert.equal(data.key, "synthetic-same-qr");
+      polls++;
+      if (polls === 1) return response({ code: 802 }, ["NMTID=synthetic-pending; Path=/"]);
+      assert.equal(data.header.NMTID, "synthetic-pending");
+      if (polls === 2) throw new TypeError("synthetic connection lost -1005");
+      return response({ code: 803 }, ["MUSIC_U=synthetic-approved; Path=/"]);
+    }
+    profiles++;
+    assert.equal(init.headers.Cookie, "MUSIC_U=synthetic-approved; NMTID=synthetic-pending");
+    if (profiles === 1) throw new TypeError("synthetic profile connection lost -1005");
+    return response({ code: 200, profile: { userId: 8, nickname: "Fixture" } });
+  });
+  assert.equal((await plugin.signIn()).id, "8");
+  assert.deepEqual([keys, polls, profiles], [1, 3, 2]);
+  assert.equal(new Set(prompts.filter(p => p.qr).map(p => p.qr)).size, 1);
+  assert.equal(prompts.filter(p => p.text.includes("正在恢复登录")).length, 2);
+  assert.equal(storage.get("session").cookies.MUSIC_U, "synthetic-approved");
+});
+
+test("QR login limits transport retries and leaves the previous session intact", async (t) => {
+  const timer = globalThis.setTimeout;
+  const delays = [];
+  t.mock.method(globalThis, "setTimeout", (fn, ms, ...args) => {
+    if (ms < 12000) delays.push(ms);
+    return timer(fn, ms <= 1500 ? 0 : ms, ...args);
+  });
+  let polls = 0;
+  const { plugin, storage } = await setup(async url => {
+    if (url.includes("unikey")) return response({ code: 200, unikey: "synthetic-qr" });
+    polls++;
+    throw new TypeError("synthetic secret must not reach error");
+  }, { cookies: { MUSIC_U: "synthetic-old" }, profile: { id: "7" } });
+  await assert.rejects(plugin.signIn(), e => e.code === "network" && !e.message.includes("synthetic"));
+  assert.equal(polls, 3);
+  assert.deepEqual(delays, [1500, 500, 1500]);
+  assert.equal(storage.get("session").cookies.MUSIC_U, "synthetic-old");
+});
+
+test("QR login retries a transport timeout without regenerating its QR", async (t) => {
+  const timer = globalThis.setTimeout;
+  t.mock.method(globalThis, "setTimeout", (fn, ms, ...args) => timer(fn, ms <= 1500 || ms === 12000 ? 0 : ms, ...args));
+  let polls = 0;
+  const { plugin } = await setup(async (url, init) => {
+    if (url.includes("unikey")) return response({ code: 200, unikey: "synthetic-qr" });
+    if (url.includes("qrcode/client/login")) {
+      polls++;
+      if (polls === 1) return new Promise((_, reject) => init.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true }));
+      return response({ code: 803 }, ["MUSIC_U=synthetic-approved; Path=/"]);
+    }
+    return response({ code: 200, profile: { userId: 8 } });
+  });
+  assert.equal((await plugin.signIn()).id, "8");
+  assert.equal(polls, 2);
+});
+
+test("sign-out or a login deadline during backoff prevents another QR request", async (t) => {
+  const timer = globalThis.setTimeout;
+  for (const action of ["signOut", "deadline"]) {
+    let wake, queued;
+    const backoff = new Promise(resolve => { queued = resolve; });
+    t.mock.method(globalThis, "setTimeout", (fn, ms, ...args) => {
+      if (ms === 500) { wake = fn; queued(); return 0; }
+      return timer(fn, ms === 1500 ? 0 : ms, ...args);
+    });
+    let polls = 0;
+    const { plugin, storage } = await setup(async url => {
+      if (url.includes("unikey")) return response({ code: 200, unikey: "synthetic-qr" });
+      polls++;
+      throw new TypeError("synthetic disconnect");
+    });
+    const login = plugin.signIn();
+    const rejected = assert.rejects(login, /登录已取消或超时/);
+    await backoff;
+    if (action === "signOut") plugin.signOut();
+    else {
+      const later = Date.now() + 180001;
+      t.mock.method(Date, "now", () => later);
+    }
+    wake();
+    await rejected;
+    assert.equal(polls, 1);
+    assert.equal(storage.has("session"), false);
+    t.mock.restoreAll();
+  }
+});
+
+test("QR login does not retry HTTP errors, malformed data, refusals or expired QR", async (t) => {
+  const timer = globalThis.setTimeout;
+  t.mock.method(globalThis, "setTimeout", (fn, ms, ...args) => timer(fn, ms === 1500 ? 0 : ms, ...args));
+  for (const result of [
+    { ok: false, status: 503 },
+    { ...response({}), json: async () => { throw new SyntaxError("private response"); } },
+    response({ code: -460 }), response({ code: 800 }), response({ code: 401 }),
+  ]) {
+    let polls = 0;
+    const { plugin } = await setup(async url => {
+      if (url.includes("unikey")) return response({ code: 200, unikey: "synthetic-qr" });
+      polls++;
+      return result;
+    });
+    await assert.rejects(plugin.signIn());
+    assert.equal(polls, 1);
+  }
+});
+
+test("transport errors do not replay account mutations", async () => {
+  let writes = 0;
+  const { plugin } = await setup(async url => {
+    if (url.includes("account/get")) return response({ code: 200, profile: { userId: 8 } });
+    writes++;
+    throw new TypeError("synthetic disconnect after write");
+  }, { cookies: { MUSIC_U: "synthetic-approved" }, profile: null });
+  await assert.rejects(plugin.like({ id: "1", on: true }), { code: "network" });
+  assert.equal(writes, 1);
+});

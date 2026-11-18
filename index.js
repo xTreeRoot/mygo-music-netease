@@ -190,11 +190,11 @@ async function request(path, params = {}, options = {}) {
     if (!response.ok) throw new Error(`网易云请求失败（HTTP ${response.status}）`);
     body = await response.json();
   } catch (error) {
-    if (controller.signal.aborted) throw new Error("网易云请求超时，请稍后重试");
+    if (controller.signal.aborted) throw fail("network", "网易云请求超时，请稍后重试");
     // Never put response bodies, request headers or login cookies in errors.
     if (response && !response.ok) throw error;
     if (response) throw new Error("网易云返回的响应无法解析，请稍后重试");
-    throw new Error("无法读取网易云音乐，请检查网络及系统代理后重试");
+    throw fail("network", "无法读取网易云音乐，请检查网络及系统代理后重试");
   } finally {
     clearTimeout(timer);
   }
@@ -373,17 +373,40 @@ export async function signIn() {
   const qr = `${SITE}/login?codekey=${encodeURIComponent(key.unikey)}`;
   host.signInPrompt({ qr, text: "请用网易云音乐手机 App 扫码，并在手机上确认登录" });
   const deadline = Date.now() + 180000;
+  const checkPending = () => {
+    if (startedEpoch !== epoch || Date.now() >= deadline) {
+      throw new Error("登录已取消或超时，请重新点击登录");
+    }
+  };
+  // Only these read-only login queries may recover after an app-switch disconnect.
+  // Keep the QR key and pending cookies; never replay account mutations globally.
+  async function readWithRetry(read) {
+    const delays = [500, 1500];
+    for (let attempt = 0; ; attempt++) {
+      checkPending();
+      try {
+        const result = await read();
+        checkPending();
+        return result;
+      } catch (error) {
+        checkPending();
+        if (error.code !== "network" || attempt >= delays.length) throw error;
+        host.signInPrompt({ qr, text: "网络连接已中断，正在恢复登录…" });
+        await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
+      }
+    }
+  }
   while (Date.now() < deadline && startedEpoch === epoch) {
     await new Promise((resolve) => setTimeout(resolve, 1500));
     if (startedEpoch !== epoch) break;
-    const result = await eapi("/api/login/qrcode/client/login", { key: key.unikey, type: 3 }, {
+    const result = await readWithRetry(() => eapi("/api/login/qrcode/client/login", { key: key.unikey, type: 3 }, {
       session: pending, codes: [800, 801, 802, 803],
-    });
+    }));
     if (result.code === 800) throw new Error("二维码已过期，请重新点击登录");
     if (result.code === 802) host.signInPrompt({ qr, text: "已扫码，请在手机上确认登录" });
     if (result.code === 803) {
       if (!pending.cookies.MUSIC_U) throw new Error("网易云未返回有效会话，请重新扫码登录");
-      pending.profile = await profileFor(pending);
+      pending.profile = await readWithRetry(() => profileFor(pending));
       if (!pending.profile) throw new Error("无法读取已登录账号，请重新扫码");
       if (startedEpoch !== epoch) break;
       session = pending;

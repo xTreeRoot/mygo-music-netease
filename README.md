@@ -4,9 +4,11 @@
 
 网易云 CDN 封面使用 `{size}` 模板，由主程序按列表、卡片及播放页所需尺寸请求缩略图，减少首次下载和大图解码。0.1.20 之前的主程序不支持此模板，使用前请先升级。
 
+本分支基于 [sogud/mygo-music-netease](https://github.com/sogud/mygo-music-netease)，兼容 MB iOS。0.1.15 修复切换到网易云确认登录时连接中断导致扫码失败：同一二维码的轮询及确认后的账号读取最多重试两次，保留待确认会话；取消、超时、接口拒绝或二维码过期后停止。其他业务请求的重试策略不变。
+
 ## 安装和使用
 
-1. 打开 MyGo Music → 设置 → 插件 → `+` → 从 GitHub 安装，填入 `sogud/mygo-music-netease`。也可从 [Releases](https://github.com/sogud/mygo-music-netease/releases) 下载 ZIP 后从本地安装，或选择本项目文件夹。
+1. 打开 MyGo Music → 设置 → 插件 → `+` → 从 GitHub 安装，填入 `xTreeRoot/mygo-music-netease`。也可从 [Releases](https://github.com/xTreeRoot/mygo-music-netease/releases) 下载 ZIP 后从本地安装，或选择本项目文件夹。
 2. 安装后，在来源选择器中选择 **网易云音乐**。
 3. 点击 **登录**，用网易云音乐手机 App 扫码，访问自己的歌单和喜欢的音乐。
 4. 每日推荐、私人雷达和个性化歌单集中在 **发现音乐**；侧栏保留 **私人漫游** 专页和 **排行榜**。推荐歌单加载失败时，可在该区域点 **查看全部** 重试，其他入口仍可使用。
