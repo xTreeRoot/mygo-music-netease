@@ -38,6 +38,92 @@ function decode(body) {
 
 const song = (id) => ({ id, name: `Song ${id}`, ar: [{ id: 5, name: "Artist" }], al: { id: 6, name: "Album" }, dt: 180000, fee: 1 });
 
+test("public MV cards use a distinct ID and resolve one native stream for sound and video", async () => {
+  const signed = "http://vod-fixture.vod.126.net/path?token=a%20b&key=%2F";
+  const requests = [];
+  const { plugin } = await setup(async (address, init) => {
+    const url = new URL(address);
+    requests.push(url);
+    assert.equal(init.headers.Cookie, undefined);
+    if (url.pathname === "/api/mv/first") return response({ code: 200, data: [{ id: 5, name: "MV", artistName: "Artist", duration: 192000, cover: "http://p1.music.126.net/wide.jpg" }] });
+    assert.equal(url.pathname, "/api/song/enhance/play/mv/url");
+    assert.equal(url.searchParams.get("id"), "5");
+    assert.equal(url.searchParams.get("r"), "240");
+    return response({ code: 200, data: { id: 5, code: 200, url: signed, size: 2048, fee: 0 } });
+  }, { cookies: { MUSIC_U: "synthetic" } });
+  const [section] = (await plugin.browse({ page: "music-videos" })).sections;
+  assert.equal(section.trackLayout, "videos");
+  const [track] = section.tracks;
+  assert.equal(track.id, "mv:5");
+  assert.equal(track.artists[0].name, "Artist");
+  assert.equal(track.album.imageUrl, "https://p1.music.126.net/wide.jpg");
+  const options = { id: track.id, quality: "standard" };
+  const [audio, video] = await Promise.all([plugin.stream(options), plugin.video(options)]);
+  assert.equal(requests.length, 2);
+  assert.deepEqual(audio, video);
+  assert.equal(audio.type, "m4a");
+  assert.equal(video.url, signed.replace("http:", "https:"));
+  await assert.rejects(plugin.video({ id: "5" }), { code: "unavailable" });
+  assert.equal(requests.length, 2);
+});
+
+test("MV refuses paid, cross-origin and mismatched responses", async () => {
+  const data = { id: 5, code: 200, url: "https://test.vod.126.net/a" };
+  for (const change of [{ fee: 1 }, { mvFee: 1 }, { id: 6 }, { url: "https://fake.vod.126.net.evil.test/a" }, { url: "https://user@ok.vod.126.net/a" }]) {
+    const { plugin } = await setup(async () => response({ code: 200, data: { ...data, ...change } }));
+    await assert.rejects(plugin.video({ id: "mv:5" }), { code: "unavailable" });
+  }
+});
+
+test("session export contains only the verified allowlist and staging does not log in before commit", async () => {
+  const answer = (address, init) => {
+    assert.equal(new URL(address).pathname, "/api/nuser/account/get");
+    assert.equal(init.headers.Cookie, "MUSIC_U=fixture; __csrf=csrf");
+    return response({ code: 200, profile: { userId: 42, nickname: "Fixture" } });
+  };
+  const original = { cookies: { MUSIC_U: "fixture", __csrf: "csrf", NMTID: "device-local", unknown: "not-portable" }, profile: { id: "999" } };
+  const source = await setup(answer, original);
+  const exported = await source.plugin.exportSession();
+  assert.deepEqual(exported, { format: 1, accountId: "42", session: { cookies: { MUSIC_U: "fixture", __csrf: "csrf" } } });
+  assert.deepEqual(source.storage.get("session"), original);
+  await assert.rejects(source.plugin.stageSession(exported), { code: "unavailable" });
+  const target = await setup(answer);
+  const staged = await target.plugin.stageSession(exported);
+  assert.equal(staged.account.id, "42");
+  assert.equal(await target.plugin.account(), null);
+  assert.equal(target.storage.has("session"), false);
+  assert.throws(() => target.plugin.commitSession({ ticket: "unknown" }), { code: "unavailable" });
+  assert.equal(target.plugin.commitSession(staged).id, "42");
+  assert.deepEqual(target.storage.get("session").cookies, exported.session.cookies);
+  assert.throws(() => target.plugin.commitSession(staged), { code: "unavailable" });
+});
+
+test("restore rejects invalid inputs, network failures, account mismatch and signed-out late results", async () => {
+  const exported = { format: 1, accountId: "42", session: { cookies: { MUSIC_U: "fixture" } } };
+  const profile = () => response({ code: 200, profile: { userId: 42, nickname: "Fixture" } });
+  let finish;
+  let requests = 0;
+  const { plugin, storage } = await setup(() => {
+    requests++;
+    if (requests === 1) throw new Error("network");
+    if (requests < 4) return profile();
+    return new Promise(resolve => { finish = resolve; });
+  });
+  await assert.rejects(plugin.stageSession({ ...exported, format: 2 }), { code: "unavailable" });
+  await assert.rejects(plugin.stageSession({ ...exported, session: { cookies: { MUSIC_U: "bad\r\nheader" } } }), { code: "unavailable" });
+  assert.equal(requests, 0);
+  await assert.rejects(plugin.stageSession(exported), { code: "network" });
+  await assert.rejects(plugin.stageSession({ ...exported, accountId: "99" }), { code: "signIn" });
+  const staged = await plugin.stageSession(exported);
+  plugin.discardSession(staged);
+  assert.throws(() => plugin.commitSession(staged), { code: "unavailable" });
+  const late = plugin.stageSession(exported);
+  plugin.signOut();
+  finish(profile());
+  await assert.rejects(late, /账号状态已改变/);
+  assert.equal(storage.has("session"), false);
+});
+
 // Each public search mapping must expose a template, not the full original or
 // a fixed small picture that would also be used in Now Playing.
 test("search provides sized artwork for tracks, albums, artists, playlists and shows", async () => {

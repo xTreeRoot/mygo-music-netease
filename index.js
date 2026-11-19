@@ -23,6 +23,9 @@ const PAGE_SIZE = 30;
 const PLAYLIST_LIMIT = 1000;
 const PRIVATE_RADAR = "3136952023";
 const COOKIE_NAMES = ["MUSIC_U", "__csrf", "NMTID"];
+const RESTORE_FORMAT = 1;
+const RESTORE_TTL = 60000;
+const pendingVideos = new Map();
 
 // MyGo 0.1.6 loads a module while holding the storage mutex. Host calls must
 // happen inside an exported action, never during module initialization.
@@ -36,6 +39,9 @@ let discoveryCovers = null;
 let heartState = null;
 let pendingHeart = null;
 let commentSnapshot = null;
+let stagedRestore = null;
+let restoreSequence = 0;
+let loginEpoch = null;
 
 function currentSession() {
   if (!session) session = host.storage.get("session") || { cookies: {}, profile: null };
@@ -121,6 +127,7 @@ function persistSession() {
 
 function clearSession() {
   epoch++;
+  stagedRestore = null;
   session = { cookies: {}, profile: null };
   profileCheckedAt = 0;
   likedCache = null;
@@ -291,6 +298,8 @@ function toEpisode(program, show) {
 }
 
 function trackIdentity(value) {
+  const mv = /^mv:([1-9]\d*)$/.exec(String(value));
+  if (mv) return { mv: idOf(mv[1]), audio: null };
   const match = /^program:(\d+)(?::(\d+))?$/.exec(String(value));
   if (match) {
     const program = idOf(match[1]);
@@ -338,6 +347,79 @@ async function profileFor(activeSession) {
   return profile ? { id: String(profile.userId), name: profile.nickname, imageUrl: artworkURL(profile.avatarUrl) } : null;
 }
 
+function portableCookies(cookies) {
+  const result = {};
+  for (const key of ["MUSIC_U", "__csrf"]) {
+    const value = cookies?.[key];
+    if (typeof value === "string" && value.length <= 8192 && /^[\x21\x23-\x2B\x2D-\x3A\x3C-\x5B\x5D-\x7E]+$/.test(value)) {
+      result[key] = value;
+    }
+  }
+  return result;
+}
+
+function applySession(next) {
+  host.storage.set("session", next);
+  session = next;
+  epoch++;
+  stagedRestore = null;
+  pendingStreams.clear();
+  heartState = null;
+  pendingHeart = null;
+  profileCheckedAt = Date.now();
+  likedCache = null;
+}
+
+export async function exportSession() {
+  const local = currentSession();
+  const cookies = portableCookies(local.cookies);
+  if (!cookies.MUSIC_U || loginEpoch === epoch) return null;
+  const started = epoch;
+  const pending = { cookies, profile: null };
+  const profile = await profileFor(pending);
+  if (epoch !== started || local !== session || !profile) return null;
+  const exported = portableCookies(pending.cookies);
+  return exported.MUSIC_U ? { format: RESTORE_FORMAT, accountId: idOf(profile.id), session: { cookies: exported } } : null;
+}
+
+export async function stageSession({ format, accountId, session: incoming } = {}) {
+  const cookies = portableCookies(incoming?.cookies);
+  if (format !== RESTORE_FORMAT || typeof accountId !== "string" || !cookies.MUSIC_U) {
+    throw fail("unavailable", "不支持的网易云会话格式");
+  }
+  accountId = idOf(accountId);
+  const local = currentSession();
+  if (local.cookies.MUSIC_U || loginEpoch === epoch) throw fail("unavailable", "已有本地会话或正在登录");
+  const pending = { cookies, profile: null };
+  const staged = { ticket: String(++restoreSequence), epoch, local, pending, expiresAt: Date.now() + RESTORE_TTL };
+  stagedRestore = staged;
+  try {
+    const profile = await profileFor(pending);
+    if (stagedRestore !== staged || epoch !== staged.epoch || session !== local) throw fail("unavailable", "会话恢复已取消");
+    if (!profile || profile.id !== accountId) throw fail("signIn", "网易云会话失效或账号不匹配");
+    pending.profile = profile;
+    return { ticket: staged.ticket, account: profile };
+  } catch (error) {
+    if (stagedRestore === staged) stagedRestore = null;
+    throw error;
+  }
+}
+
+export function commitSession({ ticket } = {}) {
+  const staged = stagedRestore;
+  if (!staged || ticket !== staged.ticket) throw fail("unavailable", "网易云会话恢复请求已失效");
+  stagedRestore = null;
+  if (!staged.pending.profile || Date.now() >= staged.expiresAt || epoch !== staged.epoch || session !== staged.local || session.cookies.MUSIC_U) {
+    throw fail("unavailable", "网易云会话恢复请求已失效");
+  }
+  applySession(staged.pending);
+  return session.profile;
+}
+
+export function discardSession({ ticket } = {}) {
+  if (ticket === undefined || stagedRestore?.ticket === ticket) stagedRestore = null;
+}
+
 export async function account() {
   const activeSession = currentSession();
   if (!activeSession.cookies.MUSIC_U) return null;
@@ -365,7 +447,14 @@ async function requireAccount() {
 }
 
 export async function signIn() {
-  const startedEpoch = ++epoch;
+  const started = ++epoch;
+  loginEpoch = started;
+  stagedRestore = null;
+  try { return await qrSignIn(started); }
+  finally { if (loginEpoch === started) loginEpoch = null; }
+}
+
+async function qrSignIn(startedEpoch) {
   const pending = { cookies: {}, profile: null };
   host.signInPrompt({ text: "正在生成网易云音乐登录二维码…" });
   const key = await eapi("/api/login/qrcode/unikey", { type: 3 }, { session: pending });
@@ -409,20 +498,16 @@ export async function signIn() {
       pending.profile = await readWithRetry(() => profileFor(pending));
       if (!pending.profile) throw new Error("无法读取已登录账号，请重新扫码");
       if (startedEpoch !== epoch) break;
-      session = pending;
-      // Reject requests started against the previous account during QR login.
-      epoch++;
-      pendingStreams.clear();
-      heartState = null;
-      pendingHeart = null;
-      profileCheckedAt = Date.now();
-      likedCache = null;
-      persistSession();
+      applySession(pending);
       host.signInPrompt({ text: "登录成功" });
       return pending.profile;
     }
   }
   throw new Error("登录已取消或超时，请重新点击登录");
+}
+
+export function cancelSignIn() {
+  if (loginEpoch === epoch) epoch++;
 }
 
 export function signOut() {
@@ -496,6 +581,16 @@ export async function home() {
 }
 
 export async function browse({ page }) {
+  if (page === "music-videos") {
+    const result = await request("/api/mv/first", { limit: 30 }, { session: { cookies: {} } });
+    const tracks = (Array.isArray(result.data) ? result.data : []).filter(item =>
+      Number.isSafeInteger(Number(item?.id)) && Number(item.id) > 0 && item.name).map(item => ({
+      id: `mv:${item.id}`, name: item.name, duration: Number(item.duration) || 0,
+      url: `${SITE}/mv?id=${item.id}`, album: { id: "", name: "", imageUrl: secureURL(item.cover) },
+      artists: (Array.isArray(item.artists) && item.artists.length ? item.artists : [{ id: item.artistId, name: item.artistName }]).map(toArtist),
+    }));
+    return { title: "音乐 MV", sections: [{ tracks, trackLayout: "videos", empty: "暂无公开 MV" }] };
+  }
   if (/^cloud:\d+$/.test(page)) {
     await requireAccount();
     const offset = pageOffset(Number(page.slice(6)));
@@ -687,7 +782,7 @@ export async function liked({ offset = 0 }) {
 
 export async function isLiked({ ids }) {
   const identities = ids.map(id => ({ id, ...trackIdentity(id) }));
-  const songs = identities.filter(item => !item.program);
+  const songs = identities.filter(item => item.audio && !item.program);
   const result = Object.fromEntries(ids.map(id => [id, false]));
   // The host also asks about episode IDs. This read-only podcast integration
   // does not export likeEpisode and must not query song likes for episodes.
@@ -701,6 +796,7 @@ export async function isLiked({ ids }) {
 
 export async function like({ id, on }) {
   const identity = trackIdentity(id);
+  if (identity.mv) throw fail("unsupported", "暂不支持喜欢或取消喜欢 MV");
   if (identity.program) throw fail("unsupported", "暂不支持喜欢或取消喜欢播客节目");
   const activeSession = currentSession();
   const generation = epoch;
@@ -793,6 +889,7 @@ export async function removeFromPlaylist({ id, trackIds }) {
 
 export async function comments({ trackId, offset = 0 }) {
   const identity = trackIdentity(trackId);
+  if (identity.mv) return { comments: [], more: false, total: 0 };
   offset = pageOffset(offset);
   const activeSession = currentSession();
   if (!commentSnapshot || commentSnapshot.thread !== identity.thread ||
@@ -891,7 +988,7 @@ function lyricAnswer(desktop, translation) {
 
 export async function lyrics({ id }) {
   const identity = trackIdentity(id);
-  if (identity.program) return { lrc: "", translation: "" };
+  if (identity.program || identity.mv) return { lrc: "", translation: "" };
   const activeSession = currentSession();
   const generation = epoch;
   const params = { id: identity.audio, cp: false, tv: 0, lv: 0, rv: 0, kv: 0, yv: 0, ytv: 0, yrv: 0 };
@@ -930,6 +1027,7 @@ export async function lyrics({ id }) {
 }
 
 export async function stream({ id, quality = "high" }) {
+  if (String(id).startsWith("mv:")) return video({ id, quality });
   id = trackIdentity(id).audio;
   if (!id) throw fail("unavailable", "该播客节目没有可播放的音频");
   const generation = epoch;
@@ -943,6 +1041,31 @@ export async function stream({ id, quality = "high" }) {
     return result;
   }
   finally { if (pendingStreams.get(key) === pending) pendingStreams.delete(key); }
+}
+
+export async function video({ id, quality = "high" }) {
+  const match = /^mv:([1-9]\d*)$/.exec(String(id));
+  if (!match) throw fail("unavailable", "请从网易云的音乐 MV 页面选择视频");
+  const mv = idOf(match[1]);
+  const resolution = quality === "standard" ? 240 : 480;
+  const key = `${epoch}:${mv}:${resolution}`;
+  const pending = pendingVideos.get(key) || loadVideo(mv, resolution);
+  pendingVideos.set(key, pending);
+  try { return await pending; }
+  finally { if (pendingVideos.get(key) === pending) pendingVideos.delete(key); }
+}
+
+async function loadVideo(id, resolution) {
+  const body = await request("/api/song/enhance/play/mv/url", { id, r: resolution }, { session: { cookies: {} } });
+  const data = body.data;
+  const url = secureURL(data?.url);
+  const size = Number(data?.size);
+  if (String(data?.id) !== id || Number(data?.code) !== 200 || (data.fee != null && Number(data.fee) !== 0) ||
+      (data.mvFee != null && Number(data.mvFee) !== 0) || (data.st != null && Number(data.st) !== 0) ||
+      !/^https:\/\/(?:[a-z0-9-]+\.)+vod\.126\.net\//i.test(url) || /[\x00-\x20\x7f\\]/.test(url)) {
+    throw fail("unavailable", "网易云未提供可播放的公开 MV 地址");
+  }
+  return { url, type: "m4a", size: size > 0 ? size : undefined, headers: { "User-Agent": UA, Referer: `${SITE}/` } };
 }
 
 async function loadStream(id, quality, generation) {
