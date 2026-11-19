@@ -40,6 +40,7 @@ const song = (id) => ({ id, name: `Song ${id}`, ar: [{ id: 5, name: "Artist" }],
 
 test("public MV cards use a distinct ID and resolve one native stream for sound and video", async () => {
   const signed = "http://vod-fixture.vod.126.net/path?token=a%20b&key=%2F";
+  let currentURL = signed;
   const requests = [];
   const { plugin } = await setup(async (address, init) => {
     const url = new URL(address);
@@ -49,7 +50,7 @@ test("public MV cards use a distinct ID and resolve one native stream for sound 
     assert.equal(url.pathname, "/api/song/enhance/play/mv/url");
     assert.equal(url.searchParams.get("id"), "5");
     assert.equal(url.searchParams.get("r"), "240");
-    return response({ code: 200, data: { id: 5, code: 200, url: signed, size: 2048, fee: 0 } });
+    return response({ code: 200, data: { id: 5, code: 200, url: currentURL, size: 2048, fee: 0 } });
   }, { cookies: { MUSIC_U: "synthetic" } });
   const [section] = (await plugin.browse({ page: "music-videos" })).sections;
   assert.equal(section.trackLayout, "videos");
@@ -60,11 +61,16 @@ test("public MV cards use a distinct ID and resolve one native stream for sound 
   const options = { id: track.id, quality: "standard" };
   const [audio, video] = await Promise.all([plugin.stream(options), plugin.video(options)]);
   assert.equal(requests.length, 2);
-  assert.deepEqual(audio, video);
+  assert.equal(audio.url, video.url);
+  assert.deepEqual(audio.headers, video.headers);
   assert.equal(audio.type, "m4a");
   assert.equal(video.url, signed.replace("http:", "https:"));
   await assert.rejects(plugin.video({ id: "5" }), { code: "unavailable" });
   assert.equal(requests.length, 2);
+  currentURL = `${signed}&refresh=1`;
+  const renewed = await plugin.stream(options);
+  assert.equal(renewed.url, currentURL.replace("http:", "https:"));
+  assert.equal(requests.length, 3);
 });
 
 test("MV refuses paid, cross-origin and mismatched responses", async () => {
