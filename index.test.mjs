@@ -377,7 +377,7 @@ test("server cookie deletion clears persisted state and cannot return after relo
 
 // A positive Max-Age overrides Expires and must persist the replacement cookie.
 test("normal cookie renewal remains persisted", async () => {
-  const { plugin, storage } = await setup(async () => response({ code: 200, result: [] }, [
+  const { plugin, storage } = await setup(async (url) => response(url.includes("account/get") ? { code: 200, profile: { userId: 8, nickname: "Fixture" } } : { code: 200, result: [] }, [
     "MUSIC_U=synthetic-renewed; Max-Age=3600; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Path=/",
   ]), { cookies: { MUSIC_U: "synthetic-old" }, profile: null });
   await plugin.home();
@@ -454,7 +454,7 @@ test("guests can discover entries but private recommendations ask for sign-in", 
   let calls = 0;
   const { plugin } = await setup(async () => { calls++; return response({ code: 200, result: [] }); });
   const home = await plugin.home();
-  assert.ok(home.sections.some(section => section.links?.some(link => link.page === "daily")));
+  assert.ok(home.sections.some(section => section.morePage === "daily"));
   const stations = await plugin.stations();
   assert.equal(stations.length, 3);
   assert.ok(stations.every(station => station.description.includes("个性化服务")));
@@ -1085,4 +1085,45 @@ test("transport errors do not replay account mutations", async () => {
   }, { cookies: { MUSIC_U: "synthetic-approved" }, profile: null });
   await assert.rejects(plugin.like({ id: "1", on: true }), { code: "network" });
   assert.equal(writes, 1);
+});
+
+
+test("home shelves use their own real resources and keep independent failures", async () => {
+  for (const weeklyFails of [false, true]) {
+    const cover = "https://p1.music.126.net/real-song.jpg";
+    const resource = { ...song(1), al: { id: 6, name: "Album", picUrl: cover } };
+    const calls = [];
+    const { plugin } = await setup(async (address, init) => {
+      const url = new URL(address);
+      calls.push(url.pathname);
+      if (url.pathname === "/api/personalized/playlist") return response({ code: 200, result: [{ id: 90, name: "Public", picUrl: "https://p1.music.126.net/public.jpg" }] });
+      if (url.pathname === "/api/nuser/account/get") return response({ code: 200, profile: { userId: 8, nickname: "Fixture" } });
+      if (url.pathname === "/api/user/playlist") return response({ code: 200, playlist: [{ id: 9, name: "Mine", coverImgUrl: "https://p1.music.126.net/mine.jpg" }], more: false });
+      if (url.pathname === "/api/v1/play/record") {
+        if (weeklyFails) throw new Error("temporary offline");
+        return response({ code: 200, weekData: [{ song: resource }] });
+      }
+      if (url.pathname === "/api/v1/cloud/get") return response({ code: 200, data: [{ songId: 1, songName: "Cloud", simpleSong: resource }], hasMore: false });
+      if (url.pathname === "/api/v3/discovery/recommend/songs") return response({ code: 200, data: { dailySongs: [resource] } });
+      if (url.pathname === "/api/v1/discovery/recommend/resource") return response({ code: 200, recommend: [] });
+      if (url.pathname === "/api/v6/playlist/detail") return response({ code: 200, playlist: { id: 3136952023, name: "Radar", trackCount: 1, trackIds: [{ id: 1 }] } });
+      const { path } = decode(init.body);
+      if (path === "/api/song/like/get") return response({ code: 200, ids: [1] });
+      assert.equal(path, "/api/v3/song/detail");
+      return response({ code: 200, songs: [resource] });
+    }, { cookies: { MUSIC_U: "synthetic" }, profile: { id: "8", name: "Fixture" } });
+    const home = await plugin.home();
+    assert.deepEqual(home.sections.slice(0, 4).map(section => section.title), ["平台歌单", "喜欢的音乐", "最近一周", "音乐云盘"]);
+    assert.equal(home.sections[0].playlists[0].imageUrl.split("?")[0], "https://p1.music.126.net/mine.jpg");
+    assert.equal(home.sections[1].tracks[0].album.imageUrl.split("?")[0], cover);
+    assert.equal(home.sections[3].tracks[0].album.imageUrl.split("?")[0], cover);
+    assert.equal(home.sections[2].morePage, "record:week");
+    if (weeklyFails) assert.match(home.sections[2].empty, /加载失败/);
+    else assert.equal(home.sections[2].tracks[0].album.imageUrl.split("?")[0], cover);
+    assert.equal(home.sections.filter(section => section.title === "私人漫游").length, 1);
+    assert.equal(home.sections.filter(section => section.title === "为你推荐").length, 1);
+    assert.equal(calls.filter(path => path === "/api/v1/play/record").length, 1);
+    assert.equal((await plugin.browse({ page: "my-playlists" })).sections[0].playlists[0].id, "9");
+    assert.equal((await plugin.browse({ page: "my-liked" })).sections[0].tracks[0].id, "1");
+  }
 });

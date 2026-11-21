@@ -35,7 +35,6 @@ let profileCheckedAt = 0;
 let likedCache = null;
 let likedRevision = 0;
 const pendingStreams = new Map();
-let discoveryCovers = null;
 let heartState = null;
 let pendingHeart = null;
 let commentSnapshot = null;
@@ -536,13 +535,7 @@ export async function search({ query, kind = "tracks", offset = 0 }) {
 async function discoveryPlaylists() {
   const data = await request("/api/personalized/playlist", { limit: 24 });
   const playlists = (data.result || []).map(toPlaylist);
-  // Decorative artwork for navigation, not a preview of private recommendations.
-  discoveryCovers = playlists.map(item => item.imageUrl).filter(Boolean);
   return playlists;
-}
-
-function discoveryCover(index) {
-  return discoveryCovers?.length ? discoveryCovers[index % discoveryCovers.length] : "";
 }
 
 async function discoverySection() {
@@ -559,28 +552,47 @@ async function discoverySection() {
   }
 }
 
+// Each shelf contains the resource it names. Never borrow unrelated playlist
+// covers for navigation: those look like duplicate recommendations on mobile.
+async function personalSection(title, page, load) {
+  if (!currentSession().cookies.MUSIC_U) return { title, morePage: page, empty: "登录后显示内容" };
+  try {
+    const section = await load();
+    return { ...section, title, morePage: page };
+  } catch (error) {
+    return { title, morePage: page, empty: error.code === "signIn" ? "请先登录网易云音乐" : "加载失败，点击更多重试" };
+  }
+}
+
+async function myMusicSections() {
+  return Promise.all([
+    personalSection("平台歌单", "my-playlists", async () => ({ playlists: (await playlists()).slice(0, 6), empty: "暂无平台歌单" })),
+    personalSection("喜欢的音乐", "my-liked", async () => ({ tracks: (await liked({ offset: 0 })).tracks.slice(0, 6), empty: "暂无喜欢的音乐" })),
+    personalSection("最近一周", "record:week", async () => { const section = (await browse({ page: "record:week" })).sections[0]; return { ...section, tracks: section.tracks.slice(0, 6) }; }),
+    personalSection("音乐云盘", "cloud:0", async () => { const section = (await browse({ page: "cloud:0" })).sections[0]; return { ...section, tracks: section.tracks.slice(0, 6) }; }),
+  ]);
+}
+
 export async function home() {
   const recommendations = await discoverySection();
+  const personal = await myMusicSections();
   return {
-    title: "发现音乐", subtitle: "网易云音乐 · 发现喜欢的音乐",
+    title: "发现音乐",
     sections: [
-      { title: "我的音乐", links: [
-        { title: "最近一周", subtitle: "听歌排行", page: "record:week" },
-        { title: "所有时间", subtitle: "听歌排行", page: "record:all" },
-        { title: "音乐云盘", subtitle: "我的云盘歌曲", page: "cloud:0" },
-      ] },
-      { title: "为你推荐", links: [
-        { title: "每日推荐", subtitle: "每天更新，为你推荐好音乐", page: "daily", imageUrl: discoveryCover(0) },
-        { title: "私人雷达", subtitle: "发现属于你的音乐", page: "radar", imageUrl: discoveryCover(1) },
-        { title: "个性化歌单", subtitle: "网易云为你推荐的歌单", page: "recommendations", imageUrl: discoveryCover(2) },
-      ] },
+      ...personal,
+      { ...recommendations, title: "为你推荐", morePage: "discovery" },
+      await personalSection("每日推荐", "daily", async () => ({ tracks: (await browse({ page: "daily" })).sections[0].tracks.slice(0, 6) })),
+      await personalSection("私人雷达", "radar", async () => ({ tracks: (await browse({ page: "radar" })).sections[0].tracks.slice(0, 6) })),
+      await personalSection("个性化歌单", "recommendations", async () => ({ playlists: (await browse({ page: "recommendations" })).sections[0].playlists.slice(0, 6) })),
       { title: "私人漫游", stations: stationList() },
-      recommendations,
     ],
   };
 }
 
 export async function browse({ page }) {
+  if (page === "my-playlists") return { title: "平台歌单", sections: [{ playlists: await playlists(), empty: "暂无平台歌单" }] };
+  if (page === "my-liked") { const result = await liked({ offset: 0 }); return { title: "喜欢的音乐", sections: [{ tracks: result.tracks, empty: "暂无喜欢的音乐", morePage: result.more ? `my-liked:${result.tracks.length}` : "" }] }; }
+  if (/^my-liked:\d+$/.test(page)) { const offset = pageOffset(Number(page.slice(9))); const result = await liked({ offset }); return { title: "喜欢的音乐", sections: [{ tracks: result.tracks, empty: "暂无喜欢的音乐", morePage: result.more ? `my-liked:${offset + result.tracks.length}` : "" }] }; }
   if (page === "music-videos") {
     const result = await request("/api/mv/first", { limit: 30 }, { session: { cookies: {} } });
     const tracks = (Array.isArray(result.data) ? result.data : []).filter(item =>
@@ -1116,17 +1128,15 @@ function stationList() {
     { id: "DEFAULT", name: "私人漫游", description: "随心听，持续推荐你可能喜欢的歌曲" },
     { id: "FAMILIAR", name: "熟悉的歌", description: "回到熟悉的旋律" },
     { id: "EXPLORE", name: "新发现", description: "探索还没听过的音乐" },
-  ].map((station, index) => ({
+  ].map(station => ({
     ...station,
     // Older hosts replace source errors with a generic toast, so keep the
     // prerequisite visible on the station card as well.
     description: `${station.description}。需在网易云 App 中开启「个性化服务」。`,
-    imageUrl: discoveryCover(index + 3),
   }));
 }
 
 export async function stations() {
-  if (discoveryCovers === null) await discoverySection();
   return stationList();
 }
 
