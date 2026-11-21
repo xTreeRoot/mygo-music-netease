@@ -13,7 +13,7 @@
     { "title": "私人漫游", "builtin": "stations" },
     { "title": "排行榜", "page": "charts", "icon": "chart" },
     { "title": "音乐 MV", "page": "music-videos", "icon": "play" },
-    { "title": "我喜欢的音乐", "builtin": "liked" },
+    { "title": "喜欢的音乐", "builtin": "liked" },
     { "title": "我的播客", "builtin": "shows" }
   ]
 }
