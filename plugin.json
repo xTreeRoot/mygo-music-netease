@@ -1,19 +1,105 @@
 {
   "id": "netease",
   "name": "网易云音乐",
-  "version": "0.1.18",
+  "version": "0.1.19",
   "minAppVersion": "0.1.21",
   "main": "index.js",
   "playback": "stream",
   "permissions": {
-    "network": ["music.163.com", "interfacepc.music.163.com", "*.vod.126.net"]
+    "network": [
+      "music.163.com",
+      "interfacepc.music.163.com",
+      "*.vod.126.net"
+    ]
   },
   "navigation": [
-    { "title": "发现音乐", "builtin": "home" },
-    { "title": "私人漫游", "builtin": "stations" },
-    { "title": "排行榜", "page": "charts", "icon": "chart" },
-    { "title": "音乐 MV", "page": "music-videos", "icon": "play" },
-    { "title": "喜欢的音乐", "builtin": "liked" },
-    { "title": "我的播客", "builtin": "shows" }
+    {
+      "title": "发现音乐",
+      "builtin": "home"
+    },
+    {
+      "title": "私人漫游",
+      "builtin": "stations"
+    },
+    {
+      "title": "排行榜",
+      "page": "charts",
+      "icon": "chart"
+    },
+    {
+      "title": "音乐 MV",
+      "page": "music-videos",
+      "icon": "play"
+    },
+    {
+      "title": "喜欢的音乐",
+      "builtin": "liked"
+    },
+    {
+      "title": "我的播客",
+      "builtin": "shows"
+    }
+  ],
+  "discovery": [
+    {
+      "id": "playlists",
+      "title": "平台歌单",
+      "page": "my-playlists"
+    },
+    {
+      "id": "liked",
+      "title": "喜欢的音乐",
+      "page": "my-liked"
+    },
+    {
+      "id": "week",
+      "title": "最近一周",
+      "page": "record:week"
+    },
+    {
+      "id": "cloud",
+      "title": "音乐云盘",
+      "page": "cloud:0"
+    },
+    {
+      "id": "discovery",
+      "title": "为你推荐",
+      "page": "discovery"
+    },
+    {
+      "id": "daily",
+      "title": "每日推荐",
+      "page": "daily"
+    },
+    {
+      "id": "radar",
+      "title": "私人雷达",
+      "page": "radar"
+    },
+    {
+      "id": "recommendations",
+      "title": "个性化歌单",
+      "page": "recommendations"
+    },
+    {
+      "id": "charts",
+      "title": "排行榜",
+      "page": "charts"
+    },
+    {
+      "id": "music-videos",
+      "title": "音乐 MV",
+      "page": "music-videos"
+    },
+    {
+      "id": "stations",
+      "title": "私人漫游",
+      "builtin": "stations"
+    },
+    {
+      "id": "shows",
+      "title": "我的播客",
+      "builtin": "shows"
+    }
   ]
 }
