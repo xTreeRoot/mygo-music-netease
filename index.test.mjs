@@ -1127,3 +1127,14 @@ test("home shelves use their own real resources and keep independent failures", 
     assert.equal((await plugin.browse({ page: "my-liked" })).sections[0].tracks[0].id, "1");
   }
 });
+
+test('artist profile and hot songs remain available when the optional album catalog fails', async () => {
+  const { plugin } = await setup(async address => {
+    const url = new URL(address);
+    if (url.pathname === '/api/v1/artist/5') return response({ code: 200, artist: { id: 5, name: 'Artist', briefDesc: 'Introduction' }, hotSongs: [] });
+    assert.equal(url.pathname, '/api/artist/albums/5');
+    return response({ code: 500 });
+  });
+  const result = await plugin.artist({ id: '5' });
+  assert.equal(result.artist.id, '5'); assert.equal(result.artist.name, 'Artist'); assert.deepEqual(result.albums, []);
+});

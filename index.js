@@ -236,7 +236,7 @@ async function request(path, params = {}, options = {}) {
 const eapi = (path, params, options = {}) => request(path, params, { ...options, eapi: true });
 
 function toArtist(artist = {}) {
-  return { id: String(artist.id || ""), name: artist.name || "", imageUrl: artworkURL(artist.img1v1Url || artist.picUrl) };
+  return { id: String(artist.id || ""), name: artist.name || "", imageUrl: artworkURL(artist.img1v1Url || artist.picUrl), description: artist.briefDesc || "" };
 }
 
 function toAlbum(album = {}) {
@@ -762,7 +762,10 @@ async function artistAlbums(id) {
 export async function artist({ id }) {
   id = idOf(id);
   const [detail, albums] = await Promise.all([
-    request(`/api/v1/artist/${id}`), artistAlbums(id),
+    request(`/api/v1/artist/${id}`), artistAlbums(id).catch(error => {
+      if (error.name === "AbortError" || error.code === "signIn") throw error;
+      return [];
+    }),
   ]);
   if (!detail.artist) throw fail("unavailable", "歌手不可用");
   return {
