@@ -46,7 +46,7 @@ The unexposed heart-mode candidate is adapted from `HeartMode` in
 uses NetEase's intelligence endpoint; live continuation and account validation
 remain pending, so the candidate is not listed in the plugin's navigation.
 
-MB iOS compatibility changes on 2026-11-19 by xTreeRoot are based on
+山海 iOS compatibility changes on 2026-11-19 by xTreeRoot are based on
 sogud/mygo-music-netease commit `7b8cb7a7203170afbfee5cb132e34624f69013c4`
 (version 0.1.14). They add bounded transport recovery for QR status polling and
 the account read after approval, preserving the QR key and pending session.
